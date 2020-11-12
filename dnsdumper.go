@@ -1,16 +1,17 @@
 package dnsdumper
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"log"
+	"net"
+	"strings"
+	"sync"
+
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
-	"log"
-	"net"
-	"os"
-	"os/signal"
-	"syscall"
 )
 
 var (
@@ -25,7 +26,15 @@ var (
 	payload gopacket.Payload
 )
 
-func readInterface(iface *net.Interface, iPacket chan<- gopacket.Packet, stop <-chan os.Signal) {
+type DNSHandler struct {
+	buffer *bytes.Buffer
+	printer *Printer
+}
+
+
+var printerWaitGroup sync.WaitGroup
+
+func readInterface(iface *net.Interface, iPacket chan<- gopacket.Packet) {
 	defer close(iPacket)
 	handler, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
 	if err != nil {
@@ -38,16 +47,14 @@ func readInterface(iface *net.Interface, iPacket chan<- gopacket.Packet, stop <-
 	for {
 		var packet gopacket.Packet
 		select {
-		case <-stop:
-			return
 		case packet = <-in:
 			iPacket <- packet
 		}
 	}
 }
 
-func filterDnsPacket(iPacket *gopacket.Packet) {
-	if pApplication := (*iPacket).Layer(layers.LayerTypeDNS); pApplication != nil {
+func handleDnsPacket(iPacket *gopacket.Packet) {
+
 		decodedLayers := []gopacket.LayerType{}
 		parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp, &udp, &dns, &payload)
 		err := parser.DecodeLayers((*iPacket).Data(), &decodedLayers)
@@ -56,34 +63,46 @@ func filterDnsPacket(iPacket *gopacket.Packet) {
 		}
 		for _, layerT := range decodedLayers {
 			if layerT == layers.LayerTypeDNS {
-				for _, query := range dns.Questions {
-					fmt.Printf("Type: %s, Class: %s\n Name: %s, Type: %s\n", query.Type.String(), query.Class.String(), string(query.Name), query.Type.String())
+				/*
+					for _, query := range dns.Questions {
+						fmt.Printf("Type: %s, Class: %s\n Name: %s, Type: %s\n", query.Type.String(), query.Class.String(), string(query.Name), query.Type.String())
+					}*/
+				for _, answer := range dns.Answers {
+					//for not printing all types of dns answers we will only print DNSTypeA
+					//https://godoc.org/github.com/google/gopacket/layers#DNSType
+					if answer.Type == 1 || answer.Type == 28 {
+						fmt.Println(strings.Repeat("=", 10) + "ANSWER" + strings.Repeat("=", 10))
+						fmt.Println("Name: ", string(answer.Name))
+						fmt.Println("IP: ", answer.IP)
+						fmt.Println("Type: ", answer.Type)
+						fmt.Println(strings.Repeat("=", 10) + "ANSWER" + strings.Repeat("=", 10))
+					}
 				}
 			}
 		}
-	}
 }
 
-func Run(ifaceName string) error {
+func Run(ifaceName, output string) error {
 	iface, err := GetInterface(ifaceName)
 	if err != nil {
 		return err
 	}
-	fmt.Println("vim-go")
+	dnsHandler := DNSHandler {
+		printer: newPrinter(output),
+	}
 	iPacket := make(chan gopacket.Packet)
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
-	go readInterface(iface, iPacket, c)
-	fmt.Println("Starting to sniff...")
+	go readInterface(iface, iPacket)
 	for {
 		select {
 		case actualPacket := <-iPacket:
-			go filterDnsPacket(&actualPacket)
-		case <-c:
-			return errors.New("Program finished by user")
-		}
+			if pdns := (actualPacket).Layer(layers.LayerTypeDNS); pdns != nil {
+				go handleDnsPacket(&actualPacket)
+			}
 	}
+
+	dnsHandler.printer.finish()
+	printerWaitGroup.Wait()
+
 	return nil
 }
