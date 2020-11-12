@@ -1,4 +1,4 @@
-package main
+package dnsdumper
 
 import (
 	"io"

@@ -2,7 +2,6 @@ package dnsdumper
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,10 +26,17 @@ var (
 )
 
 type DNSHandler struct {
-	buffer *bytes.Buffer
+	buffer  *bytes.Buffer
 	printer *Printer
 }
 
+func (h *DNSHandler) write(a ...interface{}) {
+	fmt.Fprint(h.buffer, a...)
+}
+
+func (h *DNSHandler) writeLine(a ...interface{}) {
+	fmt.Fprintln(h.buffer, a...)
+}
 
 var printerWaitGroup sync.WaitGroup
 
@@ -53,33 +59,36 @@ func readInterface(iface *net.Interface, iPacket chan<- gopacket.Packet) {
 	}
 }
 
-func handleDnsPacket(iPacket *gopacket.Packet) {
+func (h *DNSHandler) handleDnsPacket(iPacket *gopacket.Packet) {
 
-		decodedLayers := []gopacket.LayerType{}
-		parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp, &udp, &dns, &payload)
-		err := parser.DecodeLayers((*iPacket).Data(), &decodedLayers)
-		if err != nil {
-			log.Println(err)
-		}
-		for _, layerT := range decodedLayers {
-			if layerT == layers.LayerTypeDNS {
-				/*
-					for _, query := range dns.Questions {
-						fmt.Printf("Type: %s, Class: %s\n Name: %s, Type: %s\n", query.Type.String(), query.Class.String(), string(query.Name), query.Type.String())
-					}*/
-				for _, answer := range dns.Answers {
-					//for not printing all types of dns answers we will only print DNSTypeA
-					//https://godoc.org/github.com/google/gopacket/layers#DNSType
-					if answer.Type == 1 || answer.Type == 28 {
-						fmt.Println(strings.Repeat("=", 10) + "ANSWER" + strings.Repeat("=", 10))
-						fmt.Println("Name: ", string(answer.Name))
-						fmt.Println("IP: ", answer.IP)
-						fmt.Println("Type: ", answer.Type)
-						fmt.Println(strings.Repeat("=", 10) + "ANSWER" + strings.Repeat("=", 10))
-					}
+	decodedLayers := []gopacket.LayerType{}
+	h.buffer = new(bytes.Buffer)
+
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp, &udp, &dns, &payload)
+	err := parser.DecodeLayers((*iPacket).Data(), &decodedLayers)
+	if err != nil {
+		log.Println(err)
+	}
+	for _, layerT := range decodedLayers {
+		if layerT == layers.LayerTypeDNS {
+			/*
+				for _, query := range dns.Questions {
+					fmt.Printf("Type: %s, Class: %s\n Name: %s, Type: %s\n", query.Type.String(), query.Class.String(), string(query.Name), query.Type.String())
+				}*/
+			for _, answer := range dns.Answers {
+				//for not printing all types of dns answers we will only print DNSTypeA
+				//https://godoc.org/github.com/google/gopacket/layers#DNSType
+				if answer.Type == 1 || answer.Type == 28 {
+					h.writeLine(strings.Repeat("=", 10) + "ANSWER" + strings.Repeat("=", 10))
+					h.writeLine("Name: ", string(answer.Name))
+					h.writeLine("IP: ", answer.IP)
+					h.writeLine("Type: ", answer.Type)
+					h.writeLine(strings.Repeat("=", 10) + "ANSWER" + strings.Repeat("=", 10))
 				}
 			}
 		}
+	}
+	h.printer.send(h.buffer.String())
 }
 
 func Run(ifaceName, output string) error {
@@ -87,7 +96,7 @@ func Run(ifaceName, output string) error {
 	if err != nil {
 		return err
 	}
-	dnsHandler := DNSHandler {
+	dnsHandler := DNSHandler{
 		printer: newPrinter(output),
 	}
 	iPacket := make(chan gopacket.Packet)
@@ -97,8 +106,9 @@ func Run(ifaceName, output string) error {
 		select {
 		case actualPacket := <-iPacket:
 			if pdns := (actualPacket).Layer(layers.LayerTypeDNS); pdns != nil {
-				go handleDnsPacket(&actualPacket)
+				go dnsHandler.handleDnsPacket(&actualPacket)
 			}
+		}
 	}
 
 	dnsHandler.printer.finish()
